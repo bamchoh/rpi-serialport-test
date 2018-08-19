@@ -12,6 +12,59 @@
 
 #define SERIAL_PORT "/dev/ttyAMA0"
 
+long set_char_timeout(tcflag_t cflag) {
+	long baud;
+	long bits;
+	long retval;
+
+	switch(cflag & CBAUD) {
+		case B115200:
+			baud = 115200;
+			break;
+		case B57600:
+			baud = 57600;
+			break;
+		case B38400:
+			baud = 38400;
+			break;
+		case B19200:
+			baud = 19200;
+			break;
+		case B9600:
+			baud = 9600;
+			break;
+		case B4800:
+			baud = 4800;
+			break;
+		case B2400:
+			baud = 2400;
+			break;
+		default:
+			baud = 9600;
+	}
+
+	switch(cflag & CSIZE) {
+		case CS7:
+			bits = 9;
+		default:
+			bits = 10;
+	}
+
+	if(cflag & CSTOPB) {
+		bits++;
+	}
+
+	if(cflag & PARENB) {
+		bits++;
+	}
+
+	retval = 8 * (bits * 1000 * 1000) / baud;
+
+	printf("retval:%ld\n", retval);
+
+	return retval;
+}
+
 tcflag_t setBaudrate(char *rate)
 {
 	if(rate == 0)
@@ -99,6 +152,7 @@ int main(int argc, char *argv[])
 	fd_set fds, readfds;
 	struct timeval tv;
 	int n;
+	long rx_timeout;
 
 	int opt;
 	char *b_optarg;
@@ -190,60 +244,57 @@ int main(int argc, char *argv[])
 	FD_SET(fd, &readfds);
 
 	// waiting for receive any data
-	struct timespec start_time, end_time;
-	__u32 prx;
-	struct serial_icounter_struct icount;
-	ioctl(fd, TIOCGICOUNT, &icount);
-	prx = icount.rx;
+	struct timespec start_time, end_time, mid_time;
 	int delta, total = 0;
+	rx_timeout = set_char_timeout(tio.c_cflag);
 	while (1) {
 		clock_gettime(CLOCK_REALTIME, &start_time);
 
 		len = read(fd, buf, sizeof(buf));
 
+		clock_gettime(CLOCK_REALTIME, &mid_time);
+
 		if (0 < len) {
 			// check break detection count
-			ioctl(fd, TIOCGICOUNT, &icount);
-			printf("brk: %d,", icount.brk);
-			delta = icount.rx - prx;
-			total += delta;
-			printf(" rx: %d\n", icount.rx - prx);
-			prx = icount.rx;
+			// ioctl(fd, TIOCGICOUNT, &icount);
+			// printf("brk: %d,", icount.brk);
+			total += len;
+			printf(" rx: %d\n", len);
 
-			if (delta < 8) {
-				printf("end\n");
+			// print received data
+			for(i = 0; i < len; i++) {
+				if(i != 0) {
+					printf(":");
+				}
+				printf("%02X", buf[i]);
+			}
+			printf("\n");
+
+			if (len < 8) {
+				printf("total(%d), end\n", total);
 				fflush(stdout);
 				total = 0;
 			} else {
 				tv.tv_sec = 0;
-				tv.tv_usec = 1000;
+				tv.tv_usec = rx_timeout;
 
 				n = select(fd+1, &readfds, NULL, NULL, &tv);
 
 				if (n == 0) {
-					printf("end\n");
+					printf("total(%d), END\n", total);
 					fflush(stdout);
 					total = 0;
 				}
 			}
 
-			// print received data
-			// for(i = 0; i < len; i++) {
-			// 	if(i != 0) {
-			// 		// if((i % 8) == 0) {
-			// 		// 	printf("\n");
-			// 		// } else {
-			// 		printf(":");
-			// 		// }
-			// 	}
-			// 	printf("%02X", buf[i]);
-			// }
-			// printf("\n");
 		}
 
 		clock_gettime(CLOCK_REALTIME, &end_time);
 		print_time("s", start_time);
+		print_time("m", mid_time);
 		print_time("e", end_time);
+		print_duration(start_time, mid_time);
+		print_duration(mid_time, end_time);
 		print_duration(start_time, end_time);
 		printf("\n");
 		fflush(stdout);
