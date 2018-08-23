@@ -13,6 +13,13 @@
 #define SERIAL_PORT "/dev/ttyAMA0"
 #define UIOGRXIS 0x80000001
 
+int check_serial_error(int fd, struct serial_icounter_struct prev, struct serial_icounter_struct now) {
+	if(prev.parity != now.parity || prev.frame != now.frame || prev.overrun != now.overrun)
+		return -1;
+
+	return 0;
+}
+
 tcflag_t setBaudrate(char *rate)
 {
 	if(rate == 0)
@@ -199,10 +206,12 @@ int main(int argc, char *argv[])
 	prev_rxtocnt = rxtocnt;
 
 	// waiting for receive any data
+	struct serial_icounter_struct prev_icount, now_icount;
 	struct timespec start_time, end_time, mid_time;
 	int delta, total = 0;
 	int endcnt = 0;
 
+	ioctl(fd, TIOCGICOUNT, &prev_icount);
 	clock_gettime(CLOCK_REALTIME, &start_time);
 	while (1) {
 		len = read(fd, buf, sizeof(buf));
@@ -217,8 +226,11 @@ int main(int argc, char *argv[])
 			rxbuf[total+i] = buf[i];
 		}
 		// check break detection count
-		// ioctl(fd, TIOCGICOUNT, &icount);
-		// printf("brk: %d,", icount.brk);
+		ioctl(fd, TIOCGICOUNT, &now_icount);
+		if(check_serial_error(fd, prev_icount, now_icount))
+			printf("serial error happens!!\n");
+
+		prev_icount = now_icount;
 		total += len;
 
 		if (prev_rxtocnt != rxtocnt) {
