@@ -9,9 +9,19 @@
 #include <linux/serial.h>
 #include <time.h>
 #include <unistd.h>
+#include <malloc.h>
 
 #define SERIAL_PORT "/dev/ttyAMA0"
 #define UIOGRXIS 0x80000001
+#define SIZEMAX 100
+#define NUMMAX 100
+
+typedef struct log {
+	int size;
+	int num;
+	struct timespec st;
+	struct timespec et;
+} log; 
 
 int check_serial_error(int fd, struct serial_icounter_struct prev, struct serial_icounter_struct now) {
 	if(prev.parity != now.parity || prev.frame != now.frame || prev.overrun != now.overrun)
@@ -86,12 +96,16 @@ void print_time(char *name, struct timespec t) {
 	printf("%s:%10ld.%09ld ", name, t.tv_sec, t.tv_nsec);
 }
 
-void print_duration(struct timespec s, struct timespec e) {
+struct timespec calc_duration(FILE *fp, struct timespec s, struct timespec e) {
+	struct timespec tmp;
 	if(e.tv_nsec < s.tv_nsec) {
-		printf("(%ld.%09ld)", e.tv_sec - s.tv_sec - 1, e.tv_nsec + 1000000000 - s.tv_nsec);
+		tmp.tv_sec = e.tv_sec - s.tv_sec - 1;
+		tmp.tv_nsec = e.tv_nsec + 1000000000 - s.tv_nsec;
 	} else {
-		printf("(%ld.%09ld)", e.tv_sec - s.tv_sec, e.tv_nsec - s.tv_nsec);
+		tmp.tv_sec = e.tv_sec - s.tv_sec;
+		tmp.tv_nsec = e.tv_nsec - s.tv_nsec;
 	}
+	return tmp;
 }
 
 int main(int argc, char *argv[])
@@ -105,18 +119,18 @@ int main(int argc, char *argv[])
 	int len;
 	FILE *fp;
 	char sdata[1024];
-	fd_set fds, readfds;
 	struct timeval tv;
 	int n;
 	unsigned long rxtocnt = 0;
 
 	int opt;
-	char *b_optarg;
-	char *p_optarg;
-	char *s_optarg;
-	char *l_optarg;
+	char *b_optarg = 0;
+	char *p_optarg = 0;
+	char *s_optarg = 0;
+	char *l_optarg = 0;
+	char *f_optarg = 0;
 	opterr = 0;
-	while ((opt = getopt(argc, argv, "b:p:s:l:")) != -1) {
+	while ((opt = getopt(argc, argv, "b:p:s:l:f:")) != -1) {
 		switch(opt) {
 			case 'b':
 				b_optarg = optarg;
@@ -130,15 +144,27 @@ int main(int argc, char *argv[])
 			case 'l':
 				l_optarg = optarg;
 				break;
+			case 'f':
+				f_optarg = optarg;
+				break;
 			default:
 				break;
 		}
 	}
 
-	// fd = open(SERIAL_PORT, O_RDWR|O_NOCTTY);
+	if(f_optarg == 0) {
+		fp = stdout;
+	} else {
+		fp = fopen(f_optarg, "w");
+		if(fp == NULL) {
+			fprintf(stderr, "Any error happened in opening result file. (%d) \n", fp);
+			return -2;
+		}
+	}
+
 	fd = open(SERIAL_PORT, O_RDWR);
 	if (fd < 0) {
-		printf("open error\n");
+		fprintf(stderr, "open error\n");
 		return -1;
 	}
 
@@ -149,25 +175,6 @@ int main(int argc, char *argv[])
 	tio.c_cflag |= setParity(p_optarg);
 	tio.c_cflag |= setStopBits(b_optarg);
 	tio.c_cflag |= setLength(l_optarg);
-
-	tio.c_iflag &= ~IUTF8;
-	tio.c_iflag &= ~ICRNL;
-	tio.c_iflag &= ~INLCR;
-
-	tio.c_oflag &= ~OCRNL;
-	tio.c_oflag &= ~ONLRET;
-	tio.c_oflag &= ~NLDLY;
-	tio.c_oflag |= NL0;
-	tio.c_oflag &= ~CRDLY;
-	tio.c_oflag |= CR0;
-	tio.c_oflag &= ~TABDLY;
-	tio.c_oflag |= TAB0;
-	tio.c_oflag &= ~BSDLY;
-	tio.c_oflag |= BS0;
-	tio.c_oflag &= ~VTDLY;
-	tio.c_oflag |= VT0;
-	tio.c_oflag &= ~FFDLY;
-	tio.c_oflag |= FF0;
 
 	// non canonical mode setting
 	tio.c_lflag = 0;
@@ -181,86 +188,106 @@ int main(int argc, char *argv[])
 	// tcsendbreak(fd, 100);
 	// tcdrain(fd);
 
-	// write 2 bytes
-	fp = fopen("text.txt", "r");
-	if(fp==NULL) {
-		printf("File was not found\n");
-	} else {
-		while((fgets(sdata, 1024, fp)) != NULL) { }
-		for(i = 0; i < strlen(sdata); i++) {
-			printf("%02X ", sdata[i]);
-		}
-		printf("\n");
-		write(fd, sdata, strlen(sdata));
-		tcdrain(fd);
-	}
-
-	// select init
-	FD_ZERO(&readfds);
-	FD_SET(fd, &readfds);
-
-
 	// init rxtocnt
 	unsigned long prev_rxtocnt;
 	ioctl(fd, UIOGRXIS, &rxtocnt);
 	prev_rxtocnt = rxtocnt;
 
-	// waiting for receive any data
+	// init rxtotal
 	struct serial_icounter_struct prev_icount, now_icount;
-	struct timespec start_time, end_time, mid_time;
-	int delta, total = 0;
-	int endcnt = 0;
-
+	__u32 rxtotal = 0;
 	ioctl(fd, TIOCGICOUNT, &prev_icount);
+	rxtotal = prev_icount.rx;
+
+	// write 2 bytes
+	// fp = fopen("text.txt", "r");
+	// if(fp==NULL) {
+	// 	printf("File was not found\n");
+	// } else {
+	// 	while((fgets(sdata, 1024, fp)) != NULL) { }
+	// 	for(i = 0; i < strlen(sdata); i++) {
+	// 		printf("%02X ", sdata[i]);
+	// 	}
+	// 	printf("\n");
+	// 	write(fd, sdata, strlen(sdata));
+	// 	tcdrain(fd);
+	// }
+
+	log l[SIZEMAX][NUMMAX];
+
+	// waiting for receive any data
+	struct timespec start_time, end_time, mid_time;
+	int total = 0;
+	int endcnt = 0;
 	clock_gettime(CLOCK_REALTIME, &start_time);
-	while (1) {
-		len = read(fd, buf, sizeof(buf));
-		if (len <= 0) {
-			printf("read error!!\n");
-			break;
-		}
-
-		ioctl(fd, UIOGRXIS, &rxtocnt);
-
-		for(i = 0; i < len;i++) {
-			rxbuf[total+i] = buf[i];
-		}
-		// check break detection count
-		ioctl(fd, TIOCGICOUNT, &now_icount);
-		if(check_serial_error(fd, prev_icount, now_icount))
-			printf("serial error happens!!\n");
-
-		prev_icount = now_icount;
-		total += len;
-
-		if (prev_rxtocnt != rxtocnt) {
-			clock_gettime(CLOCK_REALTIME, &end_time);
-			print_duration(start_time, end_time);
-			printf("\n");
-
-			start_time.tv_sec = end_time.tv_sec;
-			start_time.tv_nsec = end_time.tv_nsec;
-
-			// write ACK
-			sdata[0] = 0x06;
-			write(fd, sdata,1);
-			tcdrain(fd);
-
-			// print received data
-			for(i = 0; i < total; i++) {
-				if(i != 0) {
-					printf(":");
+	for(int size = 1; size < SIZEMAX; size++) {
+		for(int num = 0; num < NUMMAX; num++) {
+			write(fd, sdata, size);
+			while(1) {
+				len = read(fd, buf, sizeof(buf));
+				if (len <= 0) {
+					fprintf(stderr, "read error!!\n");
+					break;
 				}
-				printf("%02X", rxbuf[i]);
-			}
-			printf("\n");
 
-			printf("total(%d), END(%d)\n", total, endcnt++);
-			fflush(stdout);
-			prev_rxtocnt = rxtocnt;
-			total = 0;
+				ioctl(fd, UIOGRXIS, &rxtocnt);
+
+				for(i = 0; i < len;i++) {
+					rxbuf[total+i] = buf[i];
+				}
+				// check break detection count
+				ioctl(fd, TIOCGICOUNT, &now_icount);
+				if(check_serial_error(fd, prev_icount, now_icount))
+					printf("serial error happens!!\n");
+
+				prev_icount = now_icount;
+				total += len;
+
+				if (prev_rxtocnt != rxtocnt && total == (prev_icount.rx - rxtotal)) {
+
+					clock_gettime(CLOCK_REALTIME, &end_time);
+
+					l[size][num].size = size;
+					l[size][num].num = num;
+					l[size][num].st = start_time;
+					l[size][num].et = end_time;
+
+					start_time.tv_sec = end_time.tv_sec;
+					start_time.tv_nsec = end_time.tv_nsec;
+
+					// print received data
+					// for(i = 0; i < total; i++) {
+					// 	if(i != 0) {
+					// 		printf(":");
+					// 	}
+					// 	printf("%02X", rxbuf[i]);
+					// }
+
+					rxtotal = prev_icount.rx;
+					prev_rxtocnt = rxtocnt;
+					memset(rxbuf, 0, total);
+					total = 0;
+					break;
+				}
+			}
 		}
 	}
+
+	for(int size = 1;size < SIZEMAX;size++) {
+		for(int num = 0; num < NUMMAX; num++) {
+			struct timespec calc;
+			calc = calc_duration(fp, l[size][num].st, l[size][num].et);
+			fprintf(fp, "size=%3d\tnum=%3d\t%ld.%09ld",
+					l[size][num].size,
+					l[size][num].num,
+					calc.tv_sec,
+					calc.tv_nsec);
+
+			fprintf(fp, "\n");
+			fflush(fp);
+		}
+	}
+
 	close(fd);
 	fclose(fp);
 	return 0;
